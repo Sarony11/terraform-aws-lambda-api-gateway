@@ -1,86 +1,6 @@
 locals {
-    create_log_group = var.enable_cloudwatch_logging == true
+    create_log_group = var.api_log_enable == true
 }
-# Creates a bucket
-resource "aws_s3_bucket" "lambda_bucket" {
-  bucket = "${var.name}-lambda-app-code"
-}
-
-# Creates an ACL for the buckete
-resource "aws_s3_bucket_acl" "bucket_acl" {
-  bucket = aws_s3_bucket.lambda_bucket.id
-  acl    = "private"
-}
-
-# Creates a zip file with the source code and loads it as data source
-data "archive_file" "lambda_app" {
-  type = "zip"
-
-  source_dir  = "${path.module}/hello-world"
-  output_path = "${path.module}/hello-world.zip"
-}
-
-# Creates an S3 object with the lambda code
-resource "aws_s3_object" "lambda_app" {
-  bucket = aws_s3_bucket.lambda_bucket.id
-
-  key    = "hello-world.zip"
-  source = data.archive_file.lambda_app.output_path
-
-  etag = filemd5(data.archive_file.lambda_app.output_path)
-}
-#####################
-## LAMBDA FUNCTION ##
-#####################
-# Creates lambda function
-resource "aws_lambda_function" "app" {
-  function_name = "${var.name}-app"
-
-  s3_bucket = aws_s3_bucket.lambda_bucket.id
-  s3_key    = aws_s3_object.lambda_app.key
-
-  runtime = "nodejs12.x"
-  handler = "hello.handler"
-
-  source_code_hash = data.archive_file.lambda_app.output_base64sha256
-
-  role = aws_iam_role.lambda_exec.arn
-}
-
-# Creates cloudwatch log group to store log messages from the lambda
-resource "aws_cloudwatch_log_group" "app" {
-  name = "/aws/lambda/${aws_lambda_function.app.function_name}"
-
-  retention_in_days = 30
-}
-
-# Creates iam role for the lambda
-resource "aws_iam_role" "lambda_exec" {
-  name = "${var.name}-app-role"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Action = "sts:AssumeRole"
-      Effect = "Allow"
-      Sid    = ""
-      Principal = {
-        Service = "lambda.amazonaws.com"
-      }
-      }
-    ]
-  })
-}
-
-# Attaches the iam role to the lambda
-resource "aws_iam_role_policy_attachment" "lambda_policy" {
-  role       = aws_iam_role.lambda_exec.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
-}
-
-#####################
-## AWS API GATEWAY ##
-#####################
 # Creates api gateway and sets the protocol
 resource "aws_apigatewayv2_api" "lambda" {
   name          = "${var.name}-gw"
@@ -91,7 +11,7 @@ resource "aws_apigatewayv2_api" "lambda" {
 resource "aws_apigatewayv2_stage" "lambda" {
   api_id = aws_apigatewayv2_api.lambda.id
 
-  name        = "${var.name}-${var.stage_name}"
+  name        = "${var.stage_name}"
   auto_deploy = true
 
   access_log_settings {
@@ -114,19 +34,24 @@ resource "aws_apigatewayv2_stage" "lambda" {
 }
 
 resource "aws_apigatewayv2_integration" "app" {
+  count              = length(var.integration_types)
   api_id = aws_apigatewayv2_api.lambda.id
 
-  integration_uri    = aws_lambda_function.app.invoke_arn
-  integration_type   = "AWS_PROXY"
-  integration_method = "POST"
+  integration_uri    = length(var.integration_uris) > 0 ? element(var.integration_uris, count.index) : ""
+  integration_type   = length(var.integration_types) > 0 ? element(var.integration_types, count.index) : "AWS_PROXY"
+  integration_method = length(var.integration_methods) > 0 ? element(var.integration_methods, count.index) : null
+  connection_type    = length(var.integration_connection_types) > 0 ? element(var.integration_connection_types, count.index) : "INTERNET"
+  connection_id      = length(var.integration_connection_ids) > 0 ? element(var.integration_connection_ids, count.index) : null
+  timeout_milliseconds = length(var.integration_timeout_milliseconds) > 0 ? element(var.integration_timeout_milliseconds, count.index) : 29000
 }
 
 # Maps the http to the lambda
 resource "aws_apigatewayv2_route" "app" {
+  count = length(var.route_key)
   api_id = aws_apigatewayv2_api.lambda.id
 
-  route_key = "GET /hello"
-  target    = "integrations/${aws_apigatewayv2_integration.app.id}"
+  route_key = var.route_key[count.index]
+  target    = "integrations/${aws_apigatewayv2_integration.app[count.index].id}"
 }
 
 # Creates log group for the lambda stage
@@ -139,9 +64,10 @@ resource "aws_cloudwatch_log_group" "api_gw" {
 
 # Gives api gateway permissions to invoke the lambda function
 resource "aws_lambda_permission" "api_gw" {
+  for_each      = toset(var.lambda_function_name)
   statement_id  = "AllowExecutionFromAPIGateway"
   action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.app.function_name
+  function_name = each.value
   principal     = "apigateway.amazonaws.com"
 
   source_arn = "${aws_apigatewayv2_api.lambda.execution_arn}/*/*"
