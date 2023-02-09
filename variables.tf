@@ -5,12 +5,6 @@ variable "name" {
   description = "Name of the project"
 }
 
-variable "bucket_name" {
-  type        = string
-  default     = null
-  description = "The name of the bucket"
-}
-
 variable "api_name" {
   type        = string
   default     = ""
