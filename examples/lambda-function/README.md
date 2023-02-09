@@ -1,1 +1,0 @@
-This deploys a lambda-function to use as an example to lambda destination for the api gateway
